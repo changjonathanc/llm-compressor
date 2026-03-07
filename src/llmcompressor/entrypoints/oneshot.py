@@ -298,6 +298,7 @@ def oneshot(
     ],
     sequential_targets: list[str] | None = None,
     sequential_offload_device: str = "cpu",
+    sequential_weight_offload_device: str = "cpu",
     quantization_aware_calibration: bool = True,
     sequential_prefetch: bool = False,
     # Miscellaneous arguments
@@ -388,6 +389,9 @@ def oneshot(
     :param sequential_offload_device: Device used to offload intermediate activations
         between sequential layers. It is recommended to use `cuda:1` if using more
         than one gpu. Default is cpu.
+    :param sequential_weight_offload_device: Device used to offload model weights.
+        Use `cuda:1` for GPU-to-GPU offloading, comma-separated devices like
+        `cuda:1,cuda:2` for multi-GPU, or `none` to disable. Default is cpu.
     :param quantization_aware_calibration: Whether to enable quantization-aware
         calibration in the sequential pipeline. When True, quantization is applied
         during forward pass in calibration. When False, quantization is disabled

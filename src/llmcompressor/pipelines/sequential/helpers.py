@@ -516,6 +516,50 @@ def get_sequential_ancestors(model: Module, targets: set[Module]) -> set[Module]
     return ancestors
 
 
+def _dispatch_multi_gpu(
+    model: PreTrainedModel,
+    onload_device: torch.device,
+    offload_devices: list[torch.device],
+) -> PreTrainedModel:
+    """Spread model weights across multiple CUDA offload devices.
+
+    Uses greedy bin-packing: leaf modules (those with direct parameters/buffers)
+    are sorted by size and assigned to the offload device with the most remaining
+    capacity.
+    """
+    from compressed_tensors.offload.module import offload_module
+
+    leaf_sizes: dict[int, int] = {}
+    for module in model.modules():
+        nbytes = sum(
+            p.numel() * p.element_size() for p in module.parameters(recurse=False)
+        )
+        nbytes += sum(
+            b.numel() * b.element_size() for b in module.buffers(recurse=False)
+        )
+        if nbytes > 0:
+            leaf_sizes[id(module)] = nbytes
+
+    sorted_ids = sorted(leaf_sizes, key=leaf_sizes.get, reverse=True)
+
+    device_usage = {d: 0 for d in offload_devices}
+    module_device_map: dict[int, torch.device] = {}
+    for mid in sorted_ids:
+        best = min(offload_devices, key=lambda d: device_usage[d])
+        module_device_map[mid] = best
+        device_usage[best] += leaf_sizes[mid]
+
+    for d in offload_devices:
+        logger.info(f"Offload device {d}: {device_usage[d] / 2**30:.1f} GiB assigned")
+
+    default_dev = offload_devices[0]
+    for module in model.modules():
+        dev = module_device_map.get(id(module), default_dev)
+        offload_module(module, onload_device, dev)
+
+    return model
+
+
 def dispatch_for_sequential(
     model: PreTrainedModel,
     onload_device: Optional[torch.device | str] = None,
@@ -526,12 +570,38 @@ def dispatch_for_sequential(
     The model will be offloaded to the CPU and dispatched to CUDA/XPU device
     if available. Removes any existing hooks.
 
+    offload_device can be:
+      - a single device string/torch.device (e.g. "cpu", "cuda:1")
+      - a comma-separated string of CUDA devices (e.g. "cuda:1,cuda:2")
+        for multi-GPU weight offloading with greedy bin-packing
+      - "none"/None to keep all weights on the onload device
+
     :param model: model to dispatch
+    :param onload_device: device for computation
+    :param offload_device: device(s) for weight storage between subgraphs
     :return: dispatched model
     """
     if onload_device is None:
         onload_device = get_main_device()
-    return offload_model(model, onload_device, offload_device)
+    if isinstance(offload_device, str) and offload_device.lower() == "none":
+        offload_device = None
+    if offload_device is None:
+        remove_hook_from_module(model, recurse=True)
+        model.to(onload_device)
+        return model
+
+    # Multi-GPU offload: comma-separated CUDA devices
+    if isinstance(offload_device, str) and "," in offload_device:
+        devices = [torch.device(d.strip()) for d in offload_device.split(",")]
+        return _dispatch_multi_gpu(model, torch.device(onload_device), devices)
+
+    # Single-device offload: move weights to the target device first, then
+    # set up OffloadCache wrappers. offload_model reads each module's current
+    # device as its offload target, so the model must be on the right device
+    # before the call. Bulk model.to() is much faster than per-module transfers.
+    offload_dev = torch.device(offload_device)
+    model.to(offload_dev)
+    return offload_model(model, onload_device)
 
 
 def _get_autowrap_functions() -> tuple[Callable[[Any], Any], ...]:

@@ -242,6 +242,17 @@ class DatasetArguments(CustomDatasetArguments):
             "than one gpu. Default is cpu."
         },
     )
+    sequential_weight_offload_device: str = field(
+        default="cpu",
+        metadata={
+            "help": "Device used to offload model weights in the sequential "
+            "pipeline. Use a CUDA device like `cuda:1` for faster offloading "
+            "via GPU-to-GPU transfers. For models that don't fit on a single "
+            "offload GPU, use comma-separated devices like `cuda:1,cuda:2`. "
+            "Set to `none` to keep weights on the compute device. "
+            "Default is cpu."
+        },
+    )
     quantization_aware_calibration: bool = field(
         default=True,
         metadata={
